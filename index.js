@@ -1,11 +1,12 @@
 require('dotenv').config();
-const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason } = require('@whiskeysockets/baileys');
 const fs = require('fs');
 const P = require('pino');
 const express = require('express');
 const bodyParser = require('body-parser');
 const qrcode = require('qrcode-terminal');
 const cron = require('node-cron');
+const fetch = require('node-fetch');
 
 const { handleContactCommand, addContact } = require('./modules/contact');
 const { sendHelp } = require('./modules/help');
@@ -19,18 +20,18 @@ let sock;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 10;
 let lastActivity = Date.now();
+let latestQR = null;
+let state, saveCreds;
 
 // ==================
 // KEEP-ALIVE SYSTEM
 // ==================
 
-// Self-ping to prevent sleep (every 10 minutes)
 function setupKeepAlive() {
   const APP_URL = process.env.APP_URL || `https://your-app-name.onrender.com`;
   
   cron.schedule('*/10 * * * *', async () => {
     try {
-      const fetch = require('node-fetch');
       await fetch(`${APP_URL}/health`);
       console.log('🏓 Keep-alive ping sent');
     } catch (err) {
@@ -39,35 +40,36 @@ function setupKeepAlive() {
   });
 }
 
-// Heart beat system for WhatsApp connection
 function startHeartbeat() {
   setInterval(async () => {
     if (sock?.user) {
       try {
-        // Send a minimal ping to keep connection alive
         await sock.sendPresenceUpdate('available');
         lastActivity = Date.now();
         console.log('💓 WhatsApp heartbeat sent');
       } catch (err) {
         console.log('⚠️ Heartbeat failed:', err.message);
-        if (Date.now() - lastActivity > 300000) { // 5 minutes
+        if (Date.now() - lastActivity > 300000) {
           console.log('🔄 Connection seems dead, reconnecting...');
           connectToWhatsApp();
         }
       }
     }
-  }, 60000); // Every minute
+  }, 60000);
 }
 
 // ==================
 // WHATSAPP CONNECTION
 // ==================
 
+async function initializeAuth() {
+  ({ state, saveCreds } = await useMultiFileAuthState('./auth'));
+}
+
 async function connectToWhatsApp() {
   try {
     console.log('🔌 Connecting to WhatsApp...');
     
-    const { state, saveCreds } = await useMultiFileAuthState('./auth');
     const { version } = await fetchLatestBaileysVersion();
 
     sock = makeWASocket({
@@ -76,14 +78,13 @@ async function connectToWhatsApp() {
       logger,
       browser: ['Ubuntu', 'Chrome', '22.04'],
       printQRInTerminal: false,
-      keepAliveIntervalMs: 10000, // Keep connection alive
+      keepAliveIntervalMs: 10000,
       connectTimeoutMs: 60000,
       defaultQueryTimeoutMs: 60000,
     });
 
     global.whatsappSock = sock;
     global.adminJid = process.env.ADMIN_JID;
-    let latestQR = null;
 
     sock.ev.on('connection.update', async (update) => {
       const { qr, connection, lastDisconnect } = update;
@@ -102,7 +103,6 @@ async function connectToWhatsApp() {
         reconnectAttempts = 0;
         lastActivity = Date.now();
         
-        // Send startup notification to admin
         if (global.adminJid) {
           try {
             await sock.sendMessage(global.adminJid, {
@@ -118,22 +118,19 @@ async function connectToWhatsApp() {
         const reason = lastDisconnect?.error?.output?.statusCode;
         console.log(`❌ Connection closed. Reason: ${reason}`);
         
-        const shouldReconnect = reason !== 401; // 401 = logged out
-        
-        if (shouldReconnect && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+        if (reason === DisconnectReason.loggedOut) {
+          console.log('🔑 Logged out. Clearing auth state and reconnecting...');
+          await initializeAuth(); // Re-initialize auth state
+          connectToWhatsApp(); // Attempt to reconnect
+        } else if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
           reconnectAttempts++;
-          const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000); // Exponential backoff
+          const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
           
           console.log(`🔄 Reconnecting in ${delay/1000}s... (Attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
           
-          setTimeout(() => {
-            connectToWhatsApp();
-          }, delay);
+          setTimeout(connectToWhatsApp, delay);
         } else {
-          console.error('❌ Max reconnection attempts reached or logged out');
-          if (reason === 401) {
-            console.log('🔑 Please scan QR code again to re-authenticate');
-          }
+          console.error('❌ Max reconnection attempts reached');
         }
       }
     });
@@ -148,7 +145,7 @@ async function connectToWhatsApp() {
       const text = m.message.conversation || m.message.extendedTextMessage?.text || '';
       const lowerText = text.toLowerCase().trim();
 
-      lastActivity = Date.now(); // Update activity timestamp
+      lastActivity = Date.now();
 
       try {
         console.log(`📩 Message from ${sender}: ${text}`);
@@ -176,7 +173,6 @@ async function connectToWhatsApp() {
       }
     });
 
-    // Handle disconnections gracefully
     sock.ev.on('CB:call', async (call) => {
       console.log('📞 Call received, declining...');
       await sock.rejectCall(call.id, call.from);
@@ -186,7 +182,7 @@ async function connectToWhatsApp() {
     console.error('❌ Connection error:', err);
     if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
       reconnectAttempts++;
-      setTimeout(() => connectToWhatsApp(), 5000);
+      setTimeout(connectToWhatsApp, 5000);
     }
   }
 }
@@ -239,7 +235,6 @@ app.get('/qr', (req, res) => {
   }
 });
 
-// Wake up endpoint for external pinging services
 app.get('/wake', (req, res) => {
   res.json({ 
     message: 'Bot is awake!', 
@@ -253,15 +248,14 @@ app.get('/wake', (req, res) => {
 // =================
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`🌐 Server running on port ${PORT}`);
   console.log(`📍 Environment: ${process.env.NODE_ENV || 'development'}`);
   
-  // Start systems
   setupKeepAlive();
   startHeartbeat();
   
-  // Initial connection
+  await initializeAuth();
   connectToWhatsApp().catch(err => {
     console.error('❌ Initial connection failed:', err);
   });
