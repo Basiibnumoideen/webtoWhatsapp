@@ -7,7 +7,7 @@ A Node.js server that:
 2. Forwards them to WhatsApp via the Baileys library  
 3. Maintains persistent connections with auto-reconnect  
 
-![System Architecture](https://img.freepik.com/free-vector/isometric-infographic-user-workstation-digital-cloud-servers-data-storage_1284-63745.jpg)
+![System Architecture]([https://img.freepik.com/free-vector/isometric-infographic-user-workstation-digital-cloud-servers-data-storage_1284-63745.j](https://media.istockphoto.com/id/1482901838/vector/3d-artificial-intelligence-digital-brain-neural-network-ai-servers-and-robots-technology.jpg?s=612x612&w=0&k=20&c=Shb9zTKQCpPkTzFvhFr8eGuGdYyHRGXI2mmrvuahkqM=)pg)
 
 ---
 
