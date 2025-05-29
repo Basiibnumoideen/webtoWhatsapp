@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: whatsapp-bot
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: ADMIN_JID
+        value: 918590882253@s.whatsapp.net
+      - key: PORT
+        value: 3000
